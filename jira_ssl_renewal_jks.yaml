@@ -1,0 +1,76 @@
+---
+- name: Renew SSL certificate and manage JKS file
+  hosts: jira_server
+  become: yes
+  gather_facts: yes
+
+  vars_files:
+    - secrets.yml
+
+  vars:
+    jks_path: "/opt/atlassian/jira/jre/{{ domain_name }}.jks"
+    backup_dir: "/opt/atlassian/jira/jre"
+    current_date: "{{ ansible_date_time.date }}"
+    temp_p12_path: "/tmp/{{ domain_name }}.p12"
+
+  tasks:
+    - name: Check if JKS file exists
+      stat:
+        path: "{{ jks_path }}"
+      register: jks_file
+
+    - name: Backup existing JKS file if it exists
+      copy:
+        src: "{{ jks_path }}"
+        dest: "{{ backup_dir }}/{{ domain_name }}.jks.{{ current_date }}"
+        mode: '0600'
+        remote_src: yes
+      when: jks_file.stat.exists
+
+    - name: Renew SSL certificate using certbot
+      command: "certbot certonly --force-renewal --standalone -d {{ domain_name }}"
+
+      register: certbot_result
+      changed_when: "'Congratulations' in certbot_result.stdout"
+      failed_when: certbot_result.rc != 0 and 'No renewals were attempted' not in certbot_result.stdout
+
+    - name: Debug certbot output
+      debug:
+        var: certbot_result.stdout_lines
+
+    - name: Create temporary PKCS12 file from certificate and key
+      command: >
+        openssl pkcs12 -export
+        -in /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem
+        -inkey /etc/letsencrypt/live/{{ domain_name }}/privkey.pem
+        -out {{ temp_p12_path }}
+        -name {{ keystore_alias }}
+        -passout pass:{{ keystore_pass }}
+      when: certbot_result.changed
+
+    - name: Convert P12 to JKS
+      command: >
+        keytool -importkeystore
+        -srckeystore {{ temp_p12_path }}
+        -srcstoretype PKCS12
+        -srcstorepass {{ keystore_pass }}
+        -destkeystore {{ jks_path }}
+        -deststoretype JKS
+        -deststorepass {{ keystore_pass }}
+        -alias {{ keystore_alias }}
+        -noprompt
+      when: certbot_result.changed
+
+    - name: Remove temporary P12 file
+      file:
+        path: "{{ temp_p12_path }}"
+        state: absent
+      when: certbot_result.changed
+
+    - name: Set proper permissions on JKS file
+      file:
+        path: "{{ jks_path }}"
+        owner: root
+        group: root
+        mode: '0600'
+      when: certbot_result.changed
