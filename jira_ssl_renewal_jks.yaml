@@ -28,15 +28,22 @@
       when: jks_file.stat.exists
 
     - name: Renew SSL certificate using certbot
-      command: "certbot certonly --force-renewal --standalone -d {{ domain_name }}"
+      command: "certbot renew"
 
       register: certbot_result
       changed_when: "'Congratulations' in certbot_result.stdout"
-      failed_when: certbot_result.rc != 0 and 'No renewals were attempted' not in certbot_result.stdout
+      failed_when: "'No renewals were attempted' in certbot_result.stdout"
+      ignore_errors: yes  # Ignore errors to allow for further step processing like printing output properly
 
     - name: Debug certbot output
       debug:
         var: certbot_result.stdout_lines
+
+    - name: Print custom message
+      debug:
+        msg: |
+          "If the certificate is renewed successfully, then only the subsequent steps will run 
+          due to the condition [when: certbot_result.changed]; otherwise, they will be skipped."
 
     - name: Create temporary PKCS12 file from certificate and key
       command: >
